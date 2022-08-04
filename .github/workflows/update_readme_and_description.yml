@@ -1,0 +1,265 @@
+name: Update the readme and description
+
+on:
+  schedule:
+    - cron: "0 0 * * SUN"
+    
+jobs:
+  build:
+    name: Update the readme and description
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: 'python -m pip install --upgrade pip pip install regex PyYAML python-csv requests PyGithub pathlib GitPython RDFlib Openpecha pyewts '
+        
+    - name: Update the readme and description
+      env:
+        SECRET: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        import pyewts
+        import yaml
+        import json
+        import logging
+        import requests
+
+        from github import Github
+        from pathlib import Path
+        from rdflib import Graph
+        from openpecha.utils import load_yaml
+        from rdflib.namespace import RDF, RDFS, SKOS, OWL, Namespace, NamespaceManager, XSD
+
+
+
+        BDR = Namespace("http://purl.bdrc.io/resource/")
+        BDO = Namespace("http://purl.bdrc.io/ontology/core/")
+        EWTSCONV = pyewts.pyewts()
+
+
+        logging.basicConfig(
+            filename="readme_update.log",
+            format="%(levelname)s: %(message)s",
+            level=logging.INFO
+        )
+
+
+        def notifier(msg):
+            logging.info(msg)
+
+
+        def update_description(pecha_id, description_data, token):
+            headers = {"Authorization": f"bearer {token}"}
+            response = requests.patch(f"https://api.github.com/repos/Openpecha-Data/{pecha_id}", headers=headers, data=json.dumps(description_data))
+            if response.status_code == 200:
+                pass
+            else :
+                notifier(f"{pecha_id} description not added ")
+                print(f"{pecha_id} description not added due to status code {response.status_code}")
+
+        def update_repo(g, pecha_id, file_path, commit_msg, new_content):
+            try:
+                repo = g.get_repo(f"Openpecha-Data/{pecha_id}")
+                contents = repo.get_contents(f"{file_path}", ref="master")
+                repo.update_file(contents.path, commit_msg , new_content, contents.sha, branch="master")
+            except:
+                notifier(f"{pecha_id} readme not updated")
+                print(f"{pecha_id} readme not updated")
+                
+        def get_new_readme(pecha_id, title, alternative_title, author, work_id, initial_type, total_vol, legacy_id):
+            Title = f"|{pecha_id}|{title} "
+            Table = f"| --- | --- "
+            if alternative_title != None:
+                AlternativeTitle = f"|Alternative Title |{alternative_title}"
+            else:
+                AlternativeTitle = f"|Alternative Title |"
+            if author != None:
+                Author= f'|Author| {author}'
+            else:
+                Author= f'|Author | '
+            Bdrcid =f"|BDRC ID | {work_id}"
+            if initial_type == "ocr":
+                Creator =f"|Creator | Google OCR"
+            else:
+                Creator =f"|Creator | {initial_type}"
+            legacy_id = f"|Legacy ID | {legacy_id}"
+            NumOfVol =f"|Number of Volumes| {total_vol}"
+            BdrcLink = f'|<img width="25" src="https://img.icons8.com/plasticine/100/000000/pictures-folder.png"/>  Source Images | [<img width="25" src="https://library.bdrc.io/icons/BUDA-small.svg"> Images of text file open in BUDA](https://library.bdrc.io/show/bdr:{work_id})'
+            new_readme = f"{Title}\n{Table}\n{AlternativeTitle}\n{Author}\n{Bdrcid}\n{legacy_id}\n{Creator}\n{NumOfVol}\n{BdrcLink}"
+            return new_readme
+
+        def get_author_id(g, work_id):
+            try:
+                work_id = f"M{work_id}"
+                instance_ids = g.objects(BDR[work_id], BDO["instanceOf"])
+                for instance_id in instance_ids:
+                    instance_id = get_id(str(instance_id))
+                agent_ids = g.objects(BDR[instance_id], BDO["creator"])
+                for agent_id in agent_ids:
+                    agent_id = get_id(str(agent_id))
+                author_ids = g.objects(BDR[agent_id], BDO["agent"])
+                for author_id in author_ids:
+                    author_id = get_id(str(author_id))
+                return author_id
+            except:
+                return None
+
+        def parse_author_ttl(author_ttl, work_id):
+            if author_ttl:
+                g = Graph()
+                try:
+                    g.parse(data=author_ttl, format="ttl")
+                except:
+                    return None
+                author_id = get_author_id(g, work_id)
+                if author_id != None:
+                    author = g.value(BDR[author_id], SKOS["prefLabel"])
+                    if author.language == "bo-x-ewts":
+                        author = ewtstobo(author)
+                    return author
+            return None
+            
+          
+        def get_author_ttl(work_id):
+            try:
+                author_ttl = requests.get(f"http://purl.bdrc.io/query/graph/OP_info?R_RES=bdr:{work_id}&format=ttl")
+                return author_ttl.text
+            except:
+                return None
+
+
+        def get_title(metadata):
+            meta_title = metadata['source_metadata']['title']
+            return meta_title
+
+        def ewtstobo(ewtsstr):
+            res = EWTSCONV.toUnicode(ewtsstr)
+            return res
+
+
+        def get_id(URI):    
+            return URI.split("/")[-1]
+
+        def get_title_ids(g, work_id):
+            title_ids = []
+            volumes = g.objects(BDR[work_id], BDO["hasTitle"])
+            for volume in volumes:
+                title_id = get_id(str(volume))
+                title_ids.append(title_id)
+            return title_ids
+
+        def parse_readme_info(meta_ttl, work_id):
+            title_list = []
+            eng_title = []
+            title_info = {}
+            curr_title = {}
+            alternative_title = None
+            work_id = f"M{work_id}"
+            g = Graph()
+            try:
+                g.parse(data=meta_ttl, format="ttl")
+            except:
+                return {}
+            title_ids = get_title_ids(g, work_id)
+            title_ids.sort()
+            for title_id in title_ids:
+                title = g.value(BDR[title_id], RDFS.label)
+                if title.language == "bo-x-ewts":
+                    title_list.append(title)
+                else:
+                    if title.language == "en":
+                        eng_title.append(title)
+                    elif title.language == "zh-latn-pinyin-x-ndia":
+                        eng_title.append(title)
+            if len(title_list) >= 2:
+                for num, title in enumerate(title_list,0):
+                    title_len = len(title)
+                    title = ewtstobo(title)
+                    if title_len in title_info.keys():
+                        title_len += 1
+                    curr_title[title_len] = {"title":title}
+                    title_info.update(curr_title)
+                    curr_title = {}
+            else:
+                if len(title_list) == 1:
+                    title = title_list[0]
+                    main_title = ewtstobo(title)
+                    return main_title, None
+                elif len(eng_title) != 0:
+                    for num,title in enumerate(eng_title, 0):
+                        title_len = len(title)
+                        curr_title[title_len]={"title":title}
+                        title_info.update(curr_title)
+                        curr_title = {}
+            num = 1
+            for key, value in sorted(title_info.items()):
+                if num  == 1:
+                    main_title = value["title"]
+                    num += 1
+                elif num == 2:
+                    alternative_title = value["title"]
+            return main_title, alternative_title
+          
+            
+        def get_meta_ttl(work_id):
+            try:
+                ttl = requests.get(f"http://purl.bdrc.io/graph/M{work_id}.ttl")
+                return ttl.text
+            except:
+                return None
+
+
+        def get_meta_info(metadata):
+            initial_type = metadata['initial_creation_type']
+            meta_bdrcid = metadata['source_metadata']['id'][4:]
+            return meta_bdrcid, initial_type
+
+
+        def get_meta(g, pecha_id):
+            try:
+                repo = g.get_repo(f"Openpecha-Data/{pecha_id}")
+                contents = repo.get_contents(f"{pecha_id}.opf/meta.yml")
+                return contents.decoded_content.decode()
+            except:
+                notifier(f"{pecha_id} not found in github")
+                return ''
+
+        def get_total_vol(g, pecha_id):
+            repo = g.get_repo(f"Openpecha-Data/{pecha_id}")
+            contents = repo.get_contents(f"{pecha_id}.opf/base")
+            total_vol = 0
+            for content in contents:
+                total_vol += 1
+            return total_vol   
+
+        if __name__=="__main__":
+            token = os.environ.get('SECRET')
+            g = Github(token)
+            file_path = "./"
+            readme_path = "./README.md"
+            commit_msg = 'readme updated'
+            ids = load_yaml(Path(f"./pecha_id_with_legacy_id.yml"))
+            for legacy_id, pecha_id in ids.items():
+                total_vol = get_total_vol(g, pecha_id)
+                meta = get_meta(g, pecha_id)
+                metadata = yaml.safe_load(meta)
+                work_id, initial_type = get_meta_info(metadata)
+                author_ttl = get_author_ttl(work_id)
+                author = parse_author_ttl(author_ttl, work_id)
+                meta_ttl = get_meta_ttl(work_id)
+                if meta_ttl != None:
+                    title, alternative_title = parse_readme_info(meta_ttl, work_id)
+                    new_readme = get_new_readme(pecha_id, title, alternative_title, author, work_id, initial_type, total_vol, legacy_id)
+                else:
+                    meta_title = get_title(metadata)
+                    new_readme = get_new_readme(pecha_id, meta_title, None, author, work_id, initial_type, total_vol, legacy_id)
+                update_repo(g, pecha_id, readme_path, commit_msg, new_readme)
+                description_data = {"description": f"Pecha ID: {pecha_id},  BDRC ID: {work_id},  Legacy ID: {legacy_id}"}
+                update_description(pecha_id, description_data, token)
+
+    
+
+    
