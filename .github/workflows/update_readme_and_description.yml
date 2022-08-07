@@ -1,8 +1,4 @@
 name: Update the readme and description
-
-on:
-  schedule:
-    - cron: "0 0 * * SUN"
     
 jobs:
   build:
